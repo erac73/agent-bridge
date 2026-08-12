@@ -2,143 +2,374 @@
 
 ## System Overview
 
-Agent Bridge implements a PC-to-server communication system for remote monitoring and task execution. The architecture follows a client-server model where:
-
-- **PC Agent** (client) runs on your development machine
-- **Server Agent** runs on the target server (e.g., Raspberry Pi)
-
-## Communication Flow
+Agent Bridge implements a **client-server architecture** for PC-to-server communication. The design follows a layered approach where each component has a clear responsibility.
 
 ```
-PC Agent                         Server Agent
-    │                                  │
-    │  ──── HTTP Request ──────────── │
-    │       (REST API + mTLS)         │
-    │                                  │
-    │  ◀─── JSON Response ────────── │
-    │                                  │
-    │  ──── POST /api/v1/command ─── │
-    │                                  │
-    │  ◀─── Command Result ───────── │
++==================================================================+
+|                        USER INTERFACE                             |
++==================================================================+
+|  PC Agent CLI (Typer + Rich)  |  Java Client (HttpClient)        |
++------------------------------------------------------------------+
+|                        TRANSPORT LAYER                            |
++------------------------------------------------------------------+
+|  httpx (Python) / HttpClient (Java)  ->  HTTP/HTTPS              |
++------------------------------------------------------------------+
+|                     NETWORK LAYER                                 |
++------------------------------------------------------------------+
+|  Tailscale (WireGuard) | Cloudflare (TLS) | SSH | LAN            |
++------------------------------------------------------------------+
+|                     SERVER LAYER                                  |
++------------------------------------------------------------------+
+|  FastAPI + Uvicorn (REST API)                                    |
++------------------------------------------------------------------+
+|                     PROCESSING LAYER                              |
++------------------------------------------------------------------+
+|  psutil (system) | Docker SDK | subprocess (commands)            |
++------------------------------------------------------------------+
+|                     DATA LAYER                                    |
++------------------------------------------------------------------+
+|  Pydantic (Python) | Jackson (Java) | JSON serialization         |
++------------------------------------------------------------------+
 ```
 
-## Components
+## Component Diagram
 
-### Shared Module (`shared/`)
-
-The shared module contains common data models and protocol definitions used by both agents:
-
-- **`models.py`** — Pydantic data models (Task, ServiceInfo, ServerStatus, Alert, CommandRequest, CommandResponse)
-- **`protocol.py`** — Communication protocol types (MessageType enum, AgentMessage envelope)
-- **`crypto.py`** — Certificate generation, API key management
-
-### Server Agent (`server-agent/`)
-
-The server agent is a FastAPI application that:
-
-1. **Monitors** system resources (CPU, memory, disk, network)
-2. **Watches** services (systemd, Docker containers, processes)
-3. **Executes** remote commands with timeout and environment support
-4. **Manages** a task queue with status tracking
-5. **Generates** alerts for threshold violations
-
-**Components:**
-- `main.py` — FastAPI application entry point
-- `agent.py` — Core agent logic (identity, heartbeat, task execution)
-- `api.py` — REST API endpoints
-- `monitor.py` — Service watchdog thread
-
-### PC Agent (`pc-agent/`)
-
-The PC agent provides a CLI interface for:
-
-1. **Server management** — Register, list, and connect to servers
-2. **Remote commands** — Execute commands with real-time output
-3. **Service monitoring** — View and control remote services
-4. **Live dashboard** — Rich-powered real-time monitoring
-
-**Components:**
-- `main.py` — Typer CLI entry point
-- `cli.py` — CLI commands (server, task, service)
-- `task_manager.py` — Server registry and API client
-- `monitor_dashboard.py` — Rich live dashboard
+```
+                              +------------------+
+                              |   User (Human)   |
+                              +--------+---------+
+                                       |
+                              +--------v---------+
+                              |                  |
+                              |    PC Agent      |
+                              |    (Client)      |
+                              |                  |
+                              |  +------------+  |
+                              |  | CLI (Typer)|  |
+                              |  +-----+------+  |
+                              |        |         |
+                              |  +-----v------+  |
+                              |  |Task Manager|  |
+                              |  +-----+------+  |
+                              |        |         |
+                              |  +-----v------+  |
+                              |  | HTTP Client|  |
+                              |  |  (httpx)   |  |
+                              |  +-----+------+  |
+                              +--------+---------+
+                                       |
+                              ~~~~ network ~~~~
+                                       |
+                              +--------v---------+
+                              |                  |
+                              |  Server Agent    |
+                              |  (FastAPI)       |
+                              |                  |
+                              |  +------------+  |
+                              |  | REST API   |  |
+                              |  | (FastAPI)  |  |
+                              |  +-----+------+  |
+                              |        |         |
+                              |  +-----v------+  |
+                              |  | Agent Core |  |
+                              |  +-----+------+  |
+                              |        |         |
+                              |  +-----v------+  |
+                              |  |  Monitor   |  |
+                              |  | (watchdog) |  |
+                              |  +-----+------+  |
+                              |        |         |
+                              +--------+---------+
+                                       |
+                    +------------------+------------------+
+                    |                  |                  |
+            +-------v-------+  +-------v-------+  +-------v-------+
+            |    psutil     |  |  Docker SDK   |  |  subprocess   |
+            |  (system)     |  | (containers)  |  |  (commands)   |
+            +---------------+  +---------------+  +---------------+
+```
 
 ## Data Flow
 
-### Command Execution
+### Command Execution Flow
 
 ```
-1. PC Agent: CLI → TaskManager.run_command(server, cmd)
-2. TaskManager: HTTP POST /api/v1/command → Server Agent
-3. Server Agent: agent.execute_command(req) → subprocess.run()
-4. Server Agent: Return CommandResponse (exit_code, stdout, stderr)
-5. PC Agent: Display result in terminal
+User                PC Agent              Network           Server Agent           OS
+ |                    |                     |                    |                   |
+ |  "docker ps"       |                     |                    |                   |
+ +------------------> |                     |                    |                   |
+ |                    |  HTTP POST           |                    |                   |
+ |                    | /api/v1/command      |                    |                   |
+ |                    | {"command":"docker"} |                    |                   |
+ |                    +--------------------> |                    |                   |
+ |                    |                     |  HTTP Request       |                   |
+ |                    |                     +------------------> |                   |
+ |                    |                     |                    |  subprocess.run()  |
+ |                    |                     |                    +------------------> |
+ |                    |                     |                    |                    | docker ps
+ |                    |                     |                    |                    |
+ |                    |                     |                    |  stdout="..."      |
+ |                    |                     |                    | <-----------------+
+ |                    |                     |  JSON Response      |                   |
+ |                    |                     | <-----------------+                   |
+ |                    |  {"exit_code":0,...} |                    |                   |
+ |                    | <--------------------+                    |                   |
+ |  "Exit Code: 0"    |                     |                    |                   |
+ | <------------------+                     |                    |                   |
 ```
 
-### Service Monitoring
+### Service Monitoring Flow
 
 ```
-1. Server Agent: monitor._loop() runs every N seconds
-2. For each watched service: _get_service_info(name)
-3. Detect type (systemd/Docker/process) → Get status
-4. Compare with previous status → Generate alerts on changes
-5. PC Agent: GET /api/v1/services → Display in table
+Server Agent                    Monitor Thread               OS
+     |                               |                        |
+     |  start()                      |                        |
+     +--------------------------->   |                        |
+     |                               |  every 15 seconds      |
+     |                               +----------------------> |
+     |                               |                        |
+     |                               |  systemctl is-active   |
+     |                               +----------------------> |
+     |                               |                        |
+     |                               |  active                |
+     |                               | <----------------------+
+     |                               |                        |
+     |                               |  docker ps             |
+     |                               +----------------------> |
+     |                               |                        |
+     |                               |  container status      |
+     |                               | <----------------------+
+     |                               |                        |
+     |  status changed!              |                        |
+     | <------------------------------+                        |
+     |                               |                        |
+     |  generate alert               |                        |
+     +--------------------------->   |                        |
+     |                               |                        |
 ```
 
-### Heartbeat
+## Shared Module
+
+The shared module defines the data models used by both PC and Server agents:
 
 ```
-1. PC Agent: GET /api/v1/agent/heartbeat
-2. Server Agent: Collect active/pending tasks, metrics
-3. Return Heartbeat (agent_id, active_tasks, metrics)
++-----------------------------------------------+
+|              shared/                           |
++-----------------------------------------------+
+|                                                |
+|  models.py          Defines all data types:    |
+|  +-------+         - Task                      |
+|  | Task  |         - ServiceInfo               |
+|  +-------+         - ServerStatus              |
+|  | id    |         - CommandRequest            |
+|  | title |         - CommandResponse           |
+|  | cmd   |         - Alert                     |
+|  | status|         - Heartbeat                 |
+|  +-------+         - AgentInfo                 |
+|                     - HealthStatus              |
+|                                                |
+|  protocol.py       Defines message types:      |
+|                     - MessageType enum          |
+|                     - AgentMessage envelope     |
+|                                                |
+|  crypto.py         Security utilities:         |
+|                     - Certificate generation   |
+|                     - API key hashing          |
+|                                                |
++-----------------------------------------------+
 ```
 
-## Security
+## Server Agent Internals
 
-### API Key Authentication
-
-Simple bearer token authentication:
 ```
-Authorization: Bearer <api-key>
++--------------------------------------------------+
+|                  Server Agent                     |
++--------------------------------------------------+
+|                                                   |
+|  main.py                                         |
+|  +--------------------------------------------+  |
+|  | FastAPI app with lifespan                  |  |
+|  | - Creates ServerAgent instance             |  |
+|  | - Starts ServiceMonitor thread             |  |
+|  | - Includes API router                      |  |
+|  +--------------------------------------------+  |
+|                                                   |
+|  agent.py                                        |
+|  +--------------------------------------------+  |
+|  | ServerAgent class                          |  |
+|  | - get_info()         -> AgentInfo          |  |
+|  | - get_heartbeat()    -> Heartbeat          |  |
+|  | - execute_command()  -> CommandResponse    |  |
+|  | - assign_task()      -> Task               |  |
+|  | - run_task()         -> Task               |  |
+|  +--------------------------------------------+  |
+|                                                   |
+|  api.py                                          |
+|  +--------------------------------------------+  |
+|  | REST Endpoints                             |  |
+|  | GET  /api/v1/agent       -> AgentInfo      |  |
+|  | GET  /api/v1/status      -> ServerStatus   |  |
+|  | GET  /api/v1/services    -> [ServiceInfo]  |  |
+|  | POST /api/v1/command     -> CommandResponse|  |
+|  | GET  /api/v1/tasks       -> [Task]         |  |
+|  | GET  /api/v1/alerts      -> [Alert]        |  |
+|  +--------------------------------------------+  |
+|                                                   |
+|  monitor.py                                      |
+|  +--------------------------------------------+  |
+|  | ServiceMonitor class (background thread)   |  |
+|  | - _check_services()                        |  |
+|  | - _get_service_info()                      |  |
+|  |   -> _check_systemd()                      |  |
+|  |   -> _check_docker()                       |  |
+|  |   -> _check_process()                      |  |
+|  | - _check_resources()                       |  |
+|  +--------------------------------------------+  |
+|                                                   |
++--------------------------------------------------+
 ```
 
-### mTLS (Mutual TLS)
+## PC Agent Internals
 
-Both client and server present certificates:
 ```
-[Server Certificate] ←→ [CA Certificate] ←→ [Client Certificate]
++--------------------------------------------------+
+|                  PC Agent                         |
++--------------------------------------------------+
+|                                                   |
+|  main.py                                         |
+|  +--------------------------------------------+  |
+|  | Typer app with sub-commands                |  |
+|  | - server (add, list, status, remove)       |  |
+|  | - task (run, list)                         |  |
+|  | - service (list, restart, watch)           |  |
+|  | - status, dashboard, config                |  |
+|  +--------------------------------------------+  |
+|                                                   |
+|  cli.py                                          |
+|  +--------------------------------------------+  |
+|  | CLI Commands                               |  |
+|  | - server_add()                             |  |
+|  | - server_list()                            |  |
+|  | - server_status()                          |  |
+|  | - task_run()                               |  |
+|  | - service_list()                           |  |
+|  | - service_restart()                        |  |
+|  | - dashboard()                              |  |
+|  +--------------------------------------------+  |
+|                                                   |
+|  task_manager.py                                 |
+|  +--------------------------------------------+  |
+|  | TaskManager class                          |  |
+|  | - add_server()                             |  |
+|  | - remove_server()                          |  |
+|  | - list_servers()                           |  |
+|  | - api_get()  -> JSON                       |  |
+|  | - api_post() -> JSON                       |  |
+|  | - run_command() -> dict                    |  |
+|  +--------------------------------------------+  |
+|                                                   |
+|  monitor_dashboard.py                            |
+|  +--------------------------------------------+  |
+|  | Rich Live Dashboard                        |  |
+|  | - make_header()                            |  |
+|  | - make_system_panel()                      |  |
+|  | - make_services_panel()                    |  |
+|  | - make_alerts_panel()                      |  |
+|  | - run_dashboard()                          |  |
+|  +--------------------------------------------+  |
+|                                                   |
++--------------------------------------------------+
 ```
 
-### Network Security
+## Java Client Architecture
 
-| Method | Encryption | Authentication | Best For |
-|--------|-----------|---------------|----------|
-| Tailscale | WireGuard | Machine identity | Remote access |
-| Cloudflare Tunnel | TLS 1.3 | Origin certificates | Public access |
-| SSH Tunnel | SSH | SSH keys | Secure local |
-| Direct LAN | None | None | Local network |
-
-## Deployment
-
-### Docker (Recommended)
-
-```bash
-# Server
-docker compose -f deploy/docker-compose.yml up -d
-
-# PC Agent (CLI only)
-docker build -t agent-bridge-pc -f pc-agent/Dockerfile .
-docker run -it agent-bridge-pc status
+```
++--------------------------------------------------+
+|              Java Client                          |
++--------------------------------------------------+
+|                                                   |
+|  AgentClient.java                                |
+|  +--------------------------------------------+  |
+|  | HttpClient (Java 11+)                     |  |
+|  | - healthCheck()       -> HealthStatus      |  |
+|  | - getAgentInfo()      -> AgentInfo         |  |
+|  | - getServerStatus()   -> ServerStatus      |  |
+|  | - getServices()       -> List<ServiceInfo> |  |
+|  | - executeCommand()    -> CommandResult     |  |
+|  | - getTasks()          -> List<Task>        |  |
+|  | - createTask()        -> Task              |  |
+|  | - runTask()           -> Task              |  |
+|  | - getAlerts()         -> List<Alert>       |  |
+|  +--------------------------------------------+  |
+|                                                   |
+|  models/                                         |
+|  +--------------------------------------------+  |
+|  | Jackson-annotated POJOs                    |  |
+|  | AgentInfo, ServerStatus, ServiceInfo       |  |
+|  | CommandRequest, CommandResult              |  |
+|  | Task, Alert, Heartbeat, HealthStatus       |  |
+|  +--------------------------------------------+  |
+|                                                   |
++--------------------------------------------------+
 ```
 
-### Native
+## Security Architecture
 
-```bash
-# Server
-cd server-agent && python main.py
+```
++--------------------------------------------------+
+|              Security Layers                      |
++--------------------------------------------------+
+|                                                   |
+|  Layer 1: Network Encryption                     |
+|  +--------------------------------------------+  |
+|  | Tailscale: WireGuard UDP tunnel            |  |
+|  | Cloudflare: TLS 1.3 + WAF                  |  |
+|  | SSH: Encrypted port forwarding             |  |
+|  | LAN: No encryption (trusted only)          |  |
+|  +--------------------------------------------+  |
+|                                                   |
+|  Layer 2: Authentication                         |
+|  +--------------------------------------------+  |
+|  | API Key: Bearer token in header            |  |
+|  | mTLS: Mutual certificate verification      |  |
+|  +--------------------------------------------+  |
+|                                                   |
+|  Layer 3: Authorization                          |
+|  +--------------------------------------------+  |
+|  | Run as limited user (not root)             |  |
+|  | Sudo rules for specific commands           |  |
+|  | Docker container isolation                 |  |
+|  +--------------------------------------------+  |
+|                                                   |
++--------------------------------------------------+
+```
 
-# PC Agent
-cd pc-agent && python main.py status
+## Deployment Architecture
+
+```
++--------------------------------------------------+
+|              Deployment Options                   |
++--------------------------------------------------+
+|                                                   |
+|  Option 1: Native                                |
+|  +--------------------------------------------+  |
+|  | Server: python main.py (systemd service)   |  |
+|  | PC: python main.py (direct execution)      |  |
+|  +--------------------------------------------+  |
+|                                                   |
+|  Option 2: Docker                                |
+|  +--------------------------------------------+  |
+|  | Server: docker compose up -d               |  |
+|  | PC: docker build + run                     |  |
+|  +--------------------------------------------+  |
+|                                                   |
+|  Option 3: Mixed                                 |
+|  +--------------------------------------------+  |
+|  | Server: Docker (port 8000)                 |  |
+|  | PC: Native Python/Java                     |  |
+|  +--------------------------------------------+  |
+|                                                   |
++--------------------------------------------------+
 ```
 
 ## Scalability
@@ -146,16 +377,36 @@ cd pc-agent && python main.py status
 The architecture supports multiple servers:
 
 ```
-┌─────────────────────────────────────────┐
-│                PC Agent                 │
-│         (manages all servers)           │
-└─────────────────────────────────────────┘
-    │              │              │
-    ↓              ↓              ↓
-┌────────┐  ┌────────┐  ┌────────┐
-│ Pi     │  │ VPS    │  │ NAS    │
-│ :8000  │  │ :8000  │  │ :8000  │
-└────────┘  └────────┘  └────────┘
+                    +------------------+
+                    |    PC Agent      |
+                    |  (manages all)   |
+                    +--------+---------+
+                             |
+            +----------------+----------------+
+            |                |                |
+    +-------v-------+ +-----v-------+ +------v------+
+    |   Pi 5        | |   VPS       | |   NAS       |
+    |   :8000       | |   :8000     | |   :8000     |
+    |               | |             | |             |
+    | Server Agent  | | Server Agent| | Server Agent|
+    +---------------+ +-------------+ +-------------+
 ```
 
-Each server runs its own agent, and the PC agent communicates with all of them independently.
+Each server runs its own agent, and the PC agent communicates with all of them independently. There is no central coordinator — each connection is direct.
+
+## Technology Matrix
+
+| Component | Technology | Why This Choice |
+|-----------|-----------|----------------|
+| REST API | FastAPI | Async, auto-docs, Pydantic validation |
+| HTTP Server | Uvicorn | High performance ASGI server |
+| HTTP Client (Python) | httpx | Async, modern, well-maintained |
+| HTTP Client (Java) | HttpClient | Built-in, no dependencies |
+| JSON (Python) | Pydantic | Type validation, serialization |
+| JSON (Java) | Jackson | Industry standard, mature |
+| System Metrics | psutil | Cross-platform, comprehensive |
+| Docker Integration | docker SDK | Direct socket communication |
+| CLI Framework | Typer | Modern, type-safe, auto-help |
+| Terminal UI | Rich | Beautiful tables, live views |
+| VPN | Tailscale | WireGuard, zero-config |
+| Containerization | Docker | Reproducible, isolated |
