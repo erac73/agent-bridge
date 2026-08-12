@@ -1,0 +1,25 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+
+# API key for authentication (generate with: python -c "from shared.crypto import generate_api_key; print(generate_api_key())")
+api_key: ""
+
+# Services to monitor
+watched_services:
+  - ssh
+  - docker
+  - nginx
+
+# Monitoring interval in seconds
+monitor_interval: 15
+
+# Heartbeat interval in seconds
+heartbeat_interval: 30
+
+# Certificate paths (for mTLS)
+tls:
+  enabled: false
+  cert_path: /etc/agent-bridge/certs/agent.crt
+  key_path: /etc/agent-bridge/certs/agent.key
+  ca_path: /etc/agent-bridge/certs/ca.crt

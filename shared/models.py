@@ -1,0 +1,188 @@
+"""Data models for Agent Bridge communication."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+# ── Enums ──────────────────────────────────────────────────────────────
+
+class TaskStatus(str, Enum):
+    PENDING = "pending"
+    ASSIGNED = "assigned"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class TaskPriority(str, Enum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class ServiceStatus(str, Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    FAILED = "failed"
+    ACTIVATING = "activating"
+    DEACTIVATING = "deactivating"
+    UNKNOWN = "unknown"
+
+
+class AlertSeverity(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+
+# ── Service Models ─────────────────────────────────────────────────────
+
+class ServiceInfo(BaseModel):
+    """Status of a single service (systemd, Docker, or process)."""
+
+    name: str
+    type: str  # "systemd" | "docker" | "process"
+    status: ServiceStatus
+    pid: int | None = None
+    uptime_seconds: float | None = None
+    memory_mb: float | None = None
+    cpu_percent: float | None = None
+    health: str | None = None  # "healthy", "unhealthy", "starting"
+    last_log: str | None = None
+    restart_count: int = 0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ServerStatus(BaseModel):
+    """Full server status snapshot."""
+
+    hostname: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    cpu_percent: float
+    cpu_count: int
+    load_avg_1: float
+    load_avg_5: float
+    load_avg_15: float
+    memory_total_gb: float
+    memory_used_gb: float
+    memory_percent: float
+    disk_total_gb: float
+    disk_used_gb: float
+    disk_percent: float
+    net_sent_gb: float
+    net_recv_gb: float
+    uptime_seconds: float
+    kernel_version: str
+    services: list[ServiceInfo] = Field(default_factory=list)
+
+
+# ── Task Models ────────────────────────────────────────────────────────
+
+class Task(BaseModel):
+    """A unit of work to be executed by an agent."""
+
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    title: str
+    description: str = ""
+    command: str | None = None
+    status: TaskStatus = TaskStatus.PENDING
+    priority: TaskPriority = TaskPriority.NORMAL
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    assigned_to: str | None = None
+    created_by: str | None = None
+    result: str | None = None
+    error: str | None = None
+    exit_code: int | None = None
+    timeout_seconds: int = 300
+    retry_count: int = 0
+    max_retries: int = 3
+    tags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+# ── Agent Models ───────────────────────────────────────────────────────
+
+class AgentInfo(BaseModel):
+    """Identity and status of an agent."""
+
+    agent_id: str
+    hostname: str
+    agent_type: str  # "pc" | "server"
+    version: str = "1.0.0"
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_heartbeat: datetime | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class Heartbeat(BaseModel):
+    """Periodic heartbeat from an agent."""
+
+    agent_id: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    status: str = "ok"
+    active_tasks: int = 0
+    pending_tasks: int = 0
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+# ── Command Models ─────────────────────────────────────────────────────
+
+class CommandRequest(BaseModel):
+    """Request to execute a command on the server."""
+
+    command: str
+    args: list[str] = Field(default_factory=list)
+    working_dir: str = "/tmp"
+    timeout_seconds: int = 300
+    env: dict[str, str] = Field(default_factory=dict)
+    request_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
+
+
+class CommandResponse(BaseModel):
+    """Result of a command execution."""
+
+    request_id: str
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    duration_seconds: float = 0
+
+
+# ── Log & Alert Models ────────────────────────────────────────────────
+
+class LogEntry(BaseModel):
+    """A structured log entry."""
+
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    level: str = "info"
+    source: str = ""
+    message: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class Alert(BaseModel):
+    """An alert generated by the monitoring system."""
+
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
+    severity: AlertSeverity
+    title: str
+    message: str
+    source: str = ""
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    acknowledged: bool = False
+    resolved: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)

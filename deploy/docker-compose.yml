@@ -1,0 +1,26 @@
+services:
+  server-agent:
+    build:
+      context: ..
+      dockerfile: server-agent/Dockerfile
+    container_name: server-agent
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - /etc/systemd:/etc/systemd:ro
+      - /run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - ./config.yaml:/app/server-agent/config.yaml:ro
+    environment:
+      - TZ=America/Guayaquil
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  default:
+    name: agent-bridge
